@@ -34,5 +34,11 @@ This first choice sets the project's shape: every later change starts from it.
 
 `make check-deps` fails if `package.json` gains a runtime dependency or a framework appears among its dependencies.
 `make check-css` fails on a literal colour outside `tokens.css`.
-`make test` runs `tests/e2e/offline.spec.js`, which visits `/`, waits for the worker to be active, reloads with the network off and fails if any request the page makes fails, so the precache list cannot drift from what the home page loads. Network-first itself (rather than cache-first) can only be reviewed: the review agent checks that `sw.js` tries the network before the cache.
+`make test` runs `tests/e2e/offline.spec.js`, so the precache list cannot drift from what the home page loads.
+The test visits `/` and waits until the worker is active and controls the page.
+It then cuts the network for both the page and the worker: `context.setOffline(true)` and `context.route('**/*', route => route.abort('internetdisconnected'))`.
+`setOffline` alone is not trusted, because it has not reliably applied to service-worker fetches in Chromium (Playwright issue 2311); since Playwright 1.57, `context.route` intercepts a worker's own requests in Chromium, so the worker's network-first fetches are aborted and it must answer from its cache.
+It reloads `/` and fails if any of the page's own requests failed (`page.on('requestfailed')`, skipping requests where `request.serviceWorker()` is set, which are the expected aborted worker fetches), or if no worker request was aborted at all, which would mean the cut never reached the worker.
+Playwright is pinned at 1.57 or later.
+The test is itself checked once: the engineering step removes one entry from the precache list, confirms the test fails, and reverts (the design's break checks). Network-first itself (rather than cache-first) can only be reviewed: the review agent checks that `sw.js` tries the network before the cache.
 A build step can only be caught in review: the review agent checks that `make package` still archives `site/` unchanged.

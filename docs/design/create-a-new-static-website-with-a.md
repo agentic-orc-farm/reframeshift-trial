@@ -32,7 +32,7 @@ criteria:
     text: The home page links a web app manifest that has a name, a start URL, a display mode, and icons sized 192x192 and 512x512 that each load with HTTP 200.
   - id: AC10
     kind: new
-    text: After one visit with the network on, reloading the home page with the network off still shows the "Hello World" heading.
+    text: After one visit with the network on, reloading the home page with the network off, for both the page and its service worker, still shows the "Hello World" heading.
   - id: AC11
     kind: new
     text: The home page and the 404 page each have a lang attribute on the html element, a non-empty title, a viewport meta tag and a non-empty meta description.
@@ -141,7 +141,7 @@ The service worker, in about 30 lines:
 
 Network-first means the cached copy is refreshed on every online visit and never served while the network answers, so a changed page or stylesheet needs no cache version and no change to `sw.js`.
 The cost is that an online visit waits for the network as it would without a worker, which for two static pages of a few kilobytes is negligible.
-The precache list is still kept by hand; a file missing from it only shows when offline, so `tests/e2e/offline.spec.js` reloads `/` with the network off and fails if any request fails (ADR 0001).
+The precache list is still kept by hand; a file missing from it only shows when offline, so `tests/e2e/offline.spec.js` reloads `/` with the network off and fails if any of the page's requests fails (ADR 0001).
 
 Layout: the body is a single-column grid with `min-height: 100svh` that centres `main`; the heading's size is a `clamp()` of the type tokens, so it scales from 320 pixels wide upwards and stays at least twice the body size (AC3).
 System font stack, no web fonts.
@@ -165,6 +165,33 @@ Two traps for the build, known in advance:
 - **Pages strips `.html`**: it redirects `/contact.html` to `/contact`. The service worker must precache only URLs that answer 200 with no redirect (`/`, the stylesheets, the scripts, the manifest, the icons), or `cache.addAll` rejects and the worker never installs. Do not precache `/index.html` or the 404 page.
 - **Without a top-level `404.html`, Pages treats the site as a single-page app** and answers every unknown path with the home page and a 200. The `404.html` file is what makes AC7 pass, and AC7 is what proves it.
 
+## Turning the network off in the tests
+
+Because the worker is network-first, every request it handles goes to the network before the cache.
+If a test cuts the page's network but not the worker's, the worker still fetches every file from the server, the page loads in full, and the offline test passes even when the precache list is missing a file.
+`context.setOffline(true)` alone is not enough: Playwright's issue 2311, closed without a fix, records it not applying to service-worker fetches in Chromium.
+
+So the offline tests (`tests/e2e/offline.spec.js`, and the acceptance test for AC10) cut the network for both, in this order:
+
+1. Visit `/` with the network on and wait until `navigator.serviceWorker.ready` resolves and `navigator.serviceWorker.controller` is set (the worker is active and controls the page).
+2. Call `context.setOffline(true)` **and** `context.route('**/*', route => route.abort('internetdisconnected'))`. Since Playwright 1.57, Chromium reports a service worker's own network requests on the browser context and lets `context.route` intercept them, so the worker's network attempts are aborted too. Requests the page makes go to the worker first and are not routed (Playwright's service-worker guide: only the worker-owned request is routable), so the route does not stop the worker answering from its cache.
+3. Collect failures with `page.on('requestfailed')`, skipping any request where `request.serviceWorker()` is set. The worker's aborted network attempts are expected; a page request that fails means the worker had nothing cached for it.
+4. Reload `/`. The test fails if any page request failed, if the `h1` "Hello World" is missing, or if no worker-owned request was aborted (`context.on('requestfailed')` with `request.serviceWorker()` set). That last condition proves the cut reached the worker; without it, a Playwright that stopped routing worker requests would let the test pass with the network still on.
+
+This method works the same against the local copy and against a deployed `BASE_URL`, which matters because AC10 runs against the dev/test address, where the test cannot stop the server.
+Playwright is pinned at 1.57 or later in `package.json` for this reason, and `PLAYWRIGHT_DISABLE_SERVICE_WORKER_NETWORK` must not be set anywhere.
+
+If the break check below shows the method does not reach the worker on the Playwright in use, the fallback for `tests/e2e/offline.spec.js` is to serve `site/` from a small Node static server started by the test on a free port, and stop that server before the reload; AC10 against a deployed address would then keep the route method, and the design would need revisiting.
+
+## Break checks
+
+Before the pull request is marked ready, the engineering step introduces each fault below, runs the named check, confirms it fails, and reverts the fault.
+A check that still passes with its fault in place is not testing what it claims.
+
+| Fault | Check that must fail |
+|---|---|
+| Remove one entry (`/styles.css`) from the worker's precache list | `make test` (`tests/e2e/offline.spec.js`) |
+
 ## The stack
 
 | Concern | Choice | Standard |
@@ -175,7 +202,7 @@ Two traps for the build, known in advance:
 | Styling | CSS custom properties in `tokens.css`; no CSS framework | Follows UI.md 3 and 8 (Firm). Two stylesheets rather than one so the linter can forbid literal colours everywhere except the tokens file; the cost is one extra request of about 1 KB. |
 | Runtime dependencies | None | Follows UI.md 1 and 4. |
 | Development tooling | Node, current LTS line pinned in `.nvmrc` (24 today; move to 26 when it enters LTS), npm with a committed `package-lock.json`, dev dependencies only | Follows UI.md 3 (npm). |
-| End-to-end and acceptance tests | Playwright, Chromium only, with `@axe-core/playwright` | Follows UI.md 3 (Playwright, Firm). Chromium only is the lightest that meets the criteria; no criterion names a browser. |
+| End-to-end and acceptance tests | Playwright 1.57 or later (it routes service-worker requests; see "Turning the network off"), Chromium only, with `@axe-core/playwright` | Follows UI.md 3 (Playwright, Firm). Chromium only is the lightest that meets the criteria; no criterion names a browser. |
 | Unit tests | None | Follows UI.md 3 and 11: there is no logic to unit-test. |
 | HTML validation | `html-validate` with its recommended and document presets | No standard names a tool. Chosen over the W3C Nu checker (`vnu-jar`) because it needs no Java; it lints against the HTML specification but is not the reference conformance checker. |
 | CSS validation and token rule | `stylelint` with `stylelint-config-standard`, plus `property-no-unknown`, `declaration-property-value-no-unknown` and `at-rule-no-unknown` for validity; `color-no-hex`, `color-named: never` and `function-disallowed-list` for the colour functions, everywhere except `tokens.css` | Follows UI.md 8 (stylelint for the tokens). There is no maintained npm wrapper for the W3C CSS validator, so stylelint's unknown-property and unknown-value rules stand in for it. |
@@ -281,6 +308,7 @@ The criteria that guard what later changes could break (the 404 status, offline,
 - That Chromium reports installability errors over the DevTools protocol in headless mode. If it does not, the installability test runs headed under `xvfb-run` in CI.
 - That Pages serves the top-level `404.html`, with status 404, for an unknown nested path such as `/no/such/page`. Cloudflare's documentation says it looks for the nearest `404.html` up the directory tree; AC7 and `make smoke` check it.
 - What `Cache-Control` Pages sends for static assets. The worker's network-first fetch goes through the browser's HTTP cache, so a long `max-age` would let a stale file be served online; if the first deploy shows one, `_headers` sets `Cache-Control: no-cache` for `/*`.
+- That the offline tests really cut the worker's network. `context.setOffline(true)` has a record of not applying to service-worker fetches in Chromium (Playwright issue 2311, closed without a fix), and Playwright's documentation of `setOffline` does not mention service workers either way. The design does not rely on it: it adds `context.route` aborts, which Playwright's 1.57 release notes and its service-worker guide say reach worker-owned requests in Chromium. I have not run this. The offline test's own check that at least one worker request was aborted, and the break check that removes a precache entry, show on the first run whether it works.
 - How Workers static assets behave in Version URLs and Previews. Cloudflare's direction is Workers with static assets, and Pages appears to be in maintenance rather than scheduled for shutdown; I found no dated end for Pages. ADR 0002 says when to revisit.
 
 ## Changes after review (round 2)
@@ -290,3 +318,7 @@ The criteria that guard what later changes could break (the 404 status, offline,
 - **F3:** every asset URL is root-absolute; AC7 also checks a nested unknown path and that the 404 page's stylesheets load.
 - **F4:** no type-checking comments is recorded as a departure from UI.md 3's default, in the stack table and in `AGENTS.md`.
 - **F5:** AC9 is split into AC9 (manifest and icons) and AC13 (service worker active); AC12 into AC12 (CSP header) and AC14 (no inline script or handlers). Existing IDs keep their meaning, so the new ones are appended.
+
+## Changes after review (round 3)
+
+- **F6:** a new section, "Turning the network off in the tests", says how the offline e2e test and the AC10 acceptance test cut the network for both the page and the worker (`context.setOffline(true)` plus a `context.route` that aborts every request, which since Playwright 1.57 reaches the worker's own fetches in Chromium), counts failures only among the page's requests (skipping those where `request.serviceWorker()` is set), and fails if no worker request was aborted. Playwright is pinned at 1.57 or later. A new "Break checks" section requires removing a precache entry and seeing the offline test fail. AC10's text now says the network is off for the page and its worker; its meaning is unchanged. ADR 0001's "What enforces it" and "What I could not verify" say the same.
