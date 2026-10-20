@@ -23,13 +23,13 @@ criteria:
     text: With JavaScript disabled, the home page still shows the "Hello World" heading.
   - id: AC7
     kind: new
-    text: A request for an unknown path (for example "/this-page-does-not-exist") answers with HTTP 404, and the page shown has a level-one heading reading "Page not found" and a link to the home page ("/").
+    text: A request for an unknown top-level path ("/this-page-does-not-exist") and for an unknown nested path ("/no/such/page") each answers with HTTP 404, and in both cases the page shown has a level-one heading reading "Page not found", a link to the home page ("/"), and its stylesheet applied (every stylesheet it links answers with HTTP 200).
   - id: AC8
     kind: new
     text: On the 404 page, pressing Tab once from a fresh load puts keyboard focus on the link to the home page, and the focused link has a computed outline style other than "none" and a computed outline width of at least 2 pixels.
   - id: AC9
     kind: new
-    text: The home page links a web app manifest that has a name, a start URL, a display mode, and icons sized 192x192 and 512x512 that each load with HTTP 200; and the home page registers a service worker that becomes active.
+    text: The home page links a web app manifest that has a name, a start URL, a display mode, and icons sized 192x192 and 512x512 that each load with HTTP 200.
   - id: AC10
     kind: new
     text: After one visit with the network on, reloading the home page with the network off still shows the "Hello World" heading.
@@ -38,7 +38,13 @@ criteria:
     text: The home page and the 404 page each have a lang attribute on the html element, a non-empty title, a viewport meta tag and a non-empty meta description.
   - id: AC12
     kind: new
-    text: The home page response carries a Content-Security-Policy header whose script-src (or, if absent, default-src) allows neither 'unsafe-inline' nor 'unsafe-eval', and neither the home page nor the 404 page contains a script element without a src attribute or an inline event handler attribute.
+    text: The home page response carries a Content-Security-Policy header whose script-src (or, if absent, default-src) allows neither 'unsafe-inline' nor 'unsafe-eval'.
+  - id: AC13
+    kind: new
+    text: After loading the home page, a service worker registered for the scope "/" becomes active.
+  - id: AC14
+    kind: new
+    text: Neither the home page nor the 404 page contains a script element without a src attribute, or any element with an inline event handler attribute (an attribute whose name starts with "on").
 ---
 
 # A static holding page with a hero "Hello World"
@@ -119,10 +125,23 @@ A folder of static files, served as they are, with no build:
 | `site/tokens.css` | The design tokens, as CSS custom properties on `:root`: colours, spacing, type scale, focus ring. Nothing else. |
 | `site/styles.css` | The styles, using only the tokens. |
 | `site/register-sw.js` | Registers the service worker, after checking `'serviceWorker' in navigator`. |
-| `site/sw.js` | A hand-written service worker: precaches the home page's files on install, serves them cache-first, and deletes old caches on activate. |
+| `site/sw.js` | A hand-written service worker, **network-first with a cache fallback** (below). |
 | `site/manifest.webmanifest` | Name, short name, start URL `/`, `display: standalone`, colours, icons. |
 | `site/icons/` | `icon-192.png`, `icon-512.png`, and `icon.svg` linked as the page's icon so the browser does not request a missing `/favicon.ico`. |
 | `site/_headers` | Response headers for every path: the content security policy and two hardening headers. |
+
+Every URL in the pages and the manifest is **root-absolute** (`/styles.css`, `/icons/icon-192.png`, `/register-sw.js`), never relative.
+Pages serves the top-level `404.html` for an unknown path at any depth, so a relative `styles.css` on the 404 page would resolve to `/no/such/styles.css` and the page would load unstyled; AC7 checks a nested path for that reason.
+
+The service worker, in about 30 lines:
+
+- **On install**, it adds a fixed list of URLs to one cache, `site`: `/`, `/tokens.css`, `/styles.css`, `/register-sw.js`, `/manifest.webmanifest` and the icons. Precaching is needed because the first visit's requests happen before the worker controls the page, so nothing else would be cached for AC10.
+- **On fetch**, for same-origin `GET` requests only: try the network; on a response with `ok` true, put a copy in the cache and return it; if the network fails, return the cached copy. Nothing else: no fallback page for uncached paths, which no criterion asks for.
+- **On activate**, it deletes every cache not named `site` and claims its clients.
+
+Network-first means the cached copy is refreshed on every online visit and never served while the network answers, so a changed page or stylesheet needs no cache version and no change to `sw.js`.
+The cost is that an online visit waits for the network as it would without a worker, which for two static pages of a few kilobytes is negligible.
+The precache list is still kept by hand; a file missing from it only shows when offline, so `tests/e2e/offline.spec.js` reloads `/` with the network off and fails if any request fails (ADR 0001).
 
 Layout: the body is a single-column grid with `min-height: 100svh` that centres `main`; the heading's size is a `clamp()` of the type tokens, so it scales from 320 pixels wide upwards and stays at least twice the body size (AC3).
 System font stack, no web fonts.
@@ -151,7 +170,7 @@ Two traps for the build, known in advance:
 | Concern | Choice | Standard |
 |---|---|---|
 | Pages | Plain HTML and CSS, no framework, no components | Follows UI.md 1 and 3 (plain HTML and CSS when there are no components). |
-| Language | None beyond two short plain JavaScript files (`register-sw.js`, `sw.js`), no type-checking comments | Follows UI.md 3: there is no logic worth typing. |
+| Language | None beyond two short plain JavaScript files (`register-sw.js`, `sw.js`), with no type-checking comments | **Departs** from UI.md 3's default for very small pages (plain JavaScript *with* type-checking comments), because there is no logic worth typing: checking the comments would add TypeScript as a dev dependency and a `tsc` step for about 35 lines of event handlers. Recorded in `AGENTS.md` as the project's one difference. Revisit when a script gains real logic. |
 | Build | None: `site/` is the deployable output, archived by `make package` | Follows UI.md 3 ("no build for a static page that does not need one"). There is no `make build`; UI.md lists it "if there is a build". |
 | Styling | CSS custom properties in `tokens.css`; no CSS framework | Follows UI.md 3 and 8 (Firm). Two stylesheets rather than one so the linter can forbid literal colours everywhere except the tokens file; the cost is one extra request of about 1 KB. |
 | Runtime dependencies | None | Follows UI.md 1 and 4. |
@@ -168,12 +187,12 @@ Two traps for the build, known in advance:
 | Hosting | Cloudflare Pages, direct upload from CI with `wrangler pages deploy` | ADR 0002. GITHUB.md 7 leaves the deploy target to the project. |
 | CI | GitHub Actions, calling only `make` targets | Follows GITHUB.md 7 and ADR 0007 of the framework. |
 
-What this rejects as heavier: Vite, TypeScript, Vitest, Web Components, a service-worker library (Workbox), a CSS framework. None is needed for two static pages and twelve criteria.
+What this rejects as heavier: Vite, TypeScript, Vitest, Web Components, a service-worker library (Workbox), a CSS framework. None is needed for two static pages and fourteen criteria.
 
 ## Standards in the project
 
 Set up copies the standards that apply into the project, as the flow asks: `docs/standards/UI.md` and `docs/standards/GITHUB.md`, version 2 draft, unchanged.
-`AGENTS.md` at the root states the project's conventions in a few lines: `make` is the only way to run anything; `site/` is served as it is and has no runtime dependencies; colours and spacing come from `tokens.css`; `tests/acceptance/` belongs to the test agent and is never edited by the engineering agent; commits are `area: what changed` with no AI trailers (GITHUB.md 3); it follows the vendored standards with no recorded differences.
+`AGENTS.md` at the root states the project's conventions in a few lines: `make` is the only way to run anything; `site/` is served as it is and has no runtime dependencies; colours and spacing come from `tokens.css`; `tests/acceptance/` belongs to the test agent and is never edited by the engineering agent; commits are `area: what changed` with no AI trailers (GITHUB.md 3); it follows the vendored standards with one recorded difference: the two JavaScript files carry no type-checking comments, departing from UI.md 3's default, because they hold no logic worth typing.
 `.gitignore` covers GITHUB.md 8's list, plus `test-results/`, `playwright-report/`, `.wrangler/` and `.lighthouse/`.
 
 ## Project layout
@@ -181,7 +200,7 @@ Set up copies the standards that apply into the project, as the flow asks: `docs
 ```
 site/                 the bundle (above)
 tests/acceptance/     the test agent's frozen acceptance tests, one file per page or concern
-tests/e2e/            the engineering agent's own checks: installability, page weight, headers file present
+tests/e2e/            the engineering agent's own checks: installability, page weight, offline with no failed request, headers file present
 scripts/              check-deps.mjs, lighthouse.mjs, deploy.sh, smoke.sh
 playwright.config.js  baseURL from BASE_URL; when it is unset, a webServer that runs wrangler pages dev on port 8788
 package.json, package-lock.json, .nvmrc, .htmlvalidate.json, .stylelintrc.json
@@ -204,11 +223,12 @@ AGENTS.md, README.md, docs/standards/, docs/design/, docs/adr/
 | `make acceptance` | `playwright test tests/acceptance`; against `BASE_URL` when it is set, otherwise Playwright's `webServer` starts the local copy. |
 | `make dev` | `wrangler pages dev site` on port 8788. |
 | `make package` | `tar` of `site/` into `dist/site.tar.gz`, with `dist/site.tar.gz.sha256` beside it. No rebuild happens anywhere after this. |
-| `make deploy ENV=<env>` | `scripts/deploy.sh`: unpacks `dist/site.tar.gz` (or `ARTIFACT`) to a temporary folder, creates the Pages project `reframeshift-trial` with production branch `main` if it does not exist, runs `wrangler pages deploy <folder> --project-name reframeshift-trial --branch <branch> --commit-hash <sha>` with `WRANGLER_OUTPUT_FILE_PATH` set, reads the deployment's URL from that output, and writes it to `dist/deploy-<env>.url`, to `$GITHUB_OUTPUT` as `url` and to `$GITHUB_STEP_SUMMARY` when those are set. Branch: `pr-<PR_NUMBER>` for `dev`, `staging` for `staging`, `main` for `prod`. Needs `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`; fails with a plain message if either is missing. |
-| `make smoke ENV=<env>` | `scripts/smoke.sh` with `curl` against `BASE_URL`, or the address in `dist/deploy-<env>.url`: `/` answers 200 and contains "Hello World"; `/this-page-does-not-exist` answers 404; `/` carries a `Content-Security-Policy` header. |
+| `make deploy ENV=<env>` | `scripts/deploy.sh`: unpacks `dist/site.tar.gz` (or `ARTIFACT`) to a temporary folder, creates the Pages project `reframeshift-trial` with production branch `main` if it does not exist, runs `wrangler pages deploy <folder> --project-name reframeshift-trial --branch <branch> --commit-hash "$COMMIT_SHA"` with `WRANGLER_OUTPUT_FILE_PATH` set, reads the deployment's URL from that output, and writes it to `dist/deploy-<env>.url`, to `$GITHUB_OUTPUT` as `url` and to `$GITHUB_STEP_SUMMARY` when those are set. Branch: `pr-<PR_NUMBER>` for `dev`, `staging` for `staging`, `main` for `prod`. Needs `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` and `COMMIT_SHA` (the commit the bundle was built from, below); fails with a plain message if any is missing. |
+| `make smoke ENV=<env>` | `scripts/smoke.sh` with `curl` against `BASE_URL`, or the address in `dist/deploy-<env>.url`: `/` answers 200 and contains "Hello World"; `/this-page-does-not-exist` and `/no/such/page` answer 404; `/` carries a `Content-Security-Policy` header. |
 | `make help` | Lists the targets. |
 
 The published address is the deployment's **unique URL** (`<hash>.<project>.pages.dev`), not the branch alias, so the address belongs to one commit, as the flow's "evidence belongs to a version" asks.
+For a pull request that commit is the **PR's head commit**, not the merge commit GitHub creates (see CI below); for a push to `main` it is the pushed commit.
 The project's `pages.dev` subdomain is not assumed: Cloudflare adds a suffix when the name is taken, so the scripts always read the address from wrangler's output.
 
 ## Environments
@@ -218,18 +238,25 @@ The project's `pages.dev` subdomain is not assumed: Cloudflare adds a suffix whe
 
 ### CI
 
-`.github/workflows/ci.yml`, with `permissions: contents: read` at the top, actions pinned to their current major versions, and one concurrency group per PR that cancels superseded runs:
+`.github/workflows/ci.yml`, with `permissions: contents: read` at the top, actions pinned to their current major versions, and one concurrency group per PR that cancels superseded runs.
 
-1. **`check`** (pull requests, and pushes to `main`): checkout, `actions/setup-node` from `.nvmrc` with the npm cache, `make setup`, `make check`, `make package`, then upload `dist/` as the artifact `site-<sha>`.
-2. **`deploy-dev`** (pull requests only, after `check`): environment `pr-<n>` with `url` from the deploy step's output. Checkout, setup-node, `make setup`, download `site-<sha>` into `dist/`, `make deploy ENV=dev` (the only step given the two Cloudflare secrets), `make smoke ENV=dev`. Exposes the address as a job output.
-3. **`acceptance-dev`** (after `deploy-dev`): checkout, setup-node, `make setup`, `make acceptance` with `BASE_URL` set to that address.
+**Which commit.** On `pull_request` events, `github.sha` and the default `actions/checkout` ref are the synthetic merge commit (`refs/pull/<n>/merge`), which exists only on GitHub and changes whenever `main` moves.
+The workflow does not use it.
+It sets one workflow-level variable, `COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}`, and every job checks out `ref: ${{ env.COMMIT_SHA }}`.
+So on a PR, CI checks, packages, deploys and accepts the PR's head commit, the commit the driver pushed and records evidence against; on a push to `main`, it is the pushed commit.
+The artifact is `site-${COMMIT_SHA}`, `make deploy` passes the same value to `--commit-hash`, and the job summary prints it beside the address.
+What this gives up is testing the PR merged with the current `main`. Branch protection closes that gap by requiring the branch to be up to date with `main` before merging (below), so the tree that was tested is the tree that merges.
+
+1. **`check`** (pull requests, and pushes to `main`): checkout of `COMMIT_SHA`, `actions/setup-node` from `.nvmrc` with the npm cache, `make setup`, `make check`, `make package`, then upload `dist/` as the artifact `site-<COMMIT_SHA>`.
+2. **`deploy-dev`** (pull requests only, after `check`): environment `pr-<n>` with `url` from the deploy step's output. Checkout of `COMMIT_SHA`, setup-node, `make setup`, download `site-<COMMIT_SHA>` into `dist/`, `make deploy ENV=dev` (the only step given the two Cloudflare secrets), `make smoke ENV=dev`. Exposes the address and `COMMIT_SHA` as job outputs.
+3. **`acceptance-dev`** (after `deploy-dev`): checkout of `COMMIT_SHA` (for the frozen tests), setup-node, `make setup`, `make acceptance` with `BASE_URL` set to that address.
 
 The three job names are the PR's checks: CI green, the address, and validation against the deployed version.
 
 ### What the owner sets up once
 
 - A Cloudflare account; an API token with the account permission **Cloudflare Pages: Edit**; the organization secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` in `agentic-orc-farm`, available to this repository. This is the manual step the plan's M4 decision expects, and it serves every later static project.
-- Branch protection on `main` (GITHUB.md 8, "from the day the repository is created"), requiring the three checks. Agents cannot touch the forge, so this is the owner's or the driver's.
+- Branch protection on `main` (GITHUB.md 8, "from the day the repository is created"), requiring the three checks and requiring branches to be up to date before merging (CI tests the head commit, not the merge commit). Agents cannot touch the forge, so this is the owner's or the driver's.
 
 ## Increments
 
@@ -252,4 +279,14 @@ The criteria that guard what later changes could break (the 404 status, offline,
 - The exact field names in wrangler's ND-JSON output for `pages deploy`. Cloudflare's changelog (2025-11-03) says `pages deploy` writes it, but does not show the format; `deploy.sh` must read it from a real run and fail loudly if no URL is found.
 - That `wrangler pages dev` applies `_headers` and the 404 page locally exactly as the host does. If it does not, the deployed run still catches it; the local copy then needs a small Node static server instead.
 - That Chromium reports installability errors over the DevTools protocol in headless mode. If it does not, the installability test runs headed under `xvfb-run` in CI.
+- That Pages serves the top-level `404.html`, with status 404, for an unknown nested path such as `/no/such/page`. Cloudflare's documentation says it looks for the nearest `404.html` up the directory tree; AC7 and `make smoke` check it.
+- What `Cache-Control` Pages sends for static assets. The worker's network-first fetch goes through the browser's HTTP cache, so a long `max-age` would let a stale file be served online; if the first deploy shows one, `_headers` sets `Cache-Control: no-cache` for `/*`.
 - How Workers static assets behave in Version URLs and Previews. Cloudflare's direction is Workers with static assets, and Pages appears to be in maintenance rather than scheduled for shutdown; I found no dated end for Pages. ADR 0002 says when to revisit.
+
+## Changes after review (round 2)
+
+- **F1:** the service worker is network-first with a cache fallback, so content changes need no cache version; the hand-kept precache list is guarded by an offline e2e check that fails on any failed request (ADR 0001).
+- **F2:** CI builds, deploys and accepts the PR's head commit (`github.event.pull_request.head.sha`), not GitHub's merge commit; one `COMMIT_SHA` names the checkout, the artifact and `--commit-hash`, and branch protection requires up-to-date branches.
+- **F3:** every asset URL is root-absolute; AC7 also checks a nested unknown path and that the 404 page's stylesheets load.
+- **F4:** no type-checking comments is recorded as a departure from UI.md 3's default, in the stack table and in `AGENTS.md`.
+- **F5:** AC9 is split into AC9 (manifest and icons) and AC13 (service worker active); AC12 into AC12 (CSP header) and AC14 (no inline script or handlers). Existing IDs keep their meaning, so the new ones are appended.
