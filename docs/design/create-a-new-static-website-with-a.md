@@ -1,42 +1,44 @@
 ---
 title: A static holding page with a hero "Hello World", and the project's first conventions
-size: large            # a new project: stack, conventions, CI and dev/test environment
+size: large            # a new project: stack, conventions, CI and a dev/test environment, in one pull request
 acceptance_tests: tests/acceptance/
-# Draft criteria. They hold for every option below; the design pass confirms them.
 criteria:
   - id: AC1
     kind: new
     text: The home page at "/" answers with HTTP 200 and has exactly one level-one heading, which reads "Hello World".
   - id: AC2
     kind: new
-    text: The "Hello World" heading is inside the page's main landmark and is fully visible without scrolling at viewport sizes 320x568, 768x1024 and 1440x900.
+    text: The "Hello World" heading is inside the page's main landmark, and its whole bounding box lies inside the viewport without scrolling at viewport sizes 320x568, 768x1024 and 1440x900.
   - id: AC3
     kind: new
-    text: The "Hello World" heading's computed font size is at least twice the computed font size of the page's body text, at all three viewport sizes.
+    text: At each of those three viewport sizes, the "Hello World" heading's computed font size is at least twice the computed font size of the body element.
   - id: AC4
     kind: new
-    text: At 320 pixels wide the home page and the 404 page do not scroll horizontally (the document's scroll width is no wider than the viewport).
+    text: At a viewport 320 pixels wide, neither the home page nor the 404 page scrolls horizontally (the document's scroll width is no greater than the viewport width).
   - id: AC5
     kind: new
-    text: An automated accessibility audit (axe, WCAG 2.2 A and AA rules) reports no violations on the home page or the 404 page.
+    text: An axe accessibility audit with the tags wcag2a, wcag2aa, wcag21a, wcag21aa and wcag22aa reports no violations on the home page or the 404 page.
   - id: AC6
     kind: new
     text: With JavaScript disabled, the home page still shows the "Hello World" heading.
   - id: AC7
     kind: new
-    text: A request for an unknown path answers with HTTP 404 and shows the site's own 404 page, which has a link back to the home page.
+    text: A request for an unknown path (for example "/this-page-does-not-exist") answers with HTTP 404, and the page shown has a level-one heading reading "Page not found" and a link to the home page ("/").
   - id: AC8
     kind: new
-    text: On the 404 page, pressing Tab from the start of the page puts keyboard focus on a link to the home page, and the focused link shows a visible focus indicator.
+    text: On the 404 page, pressing Tab once from a fresh load puts keyboard focus on the link to the home page, and the focused link has a computed outline style other than "none" and a computed outline width of at least 2 pixels.
   - id: AC9
     kind: new
-    text: The home page links a web app manifest with a name, a start URL and icons of 192 and 512 pixels, and registers a service worker.
+    text: The home page links a web app manifest that has a name, a start URL, a display mode, and icons sized 192x192 and 512x512 that each load with HTTP 200; and the home page registers a service worker that becomes active.
   - id: AC10
     kind: new
     text: After one visit with the network on, reloading the home page with the network off still shows the "Hello World" heading.
   - id: AC11
     kind: new
-    text: The home page's document has a lang attribute, a non-empty title, a viewport meta tag and a meta description.
+    text: The home page and the 404 page each have a lang attribute on the html element, a non-empty title, a viewport meta tag and a non-empty meta description.
+  - id: AC12
+    kind: new
+    text: The home page response carries a Content-Security-Policy header whose script-src (or, if absent, default-src) allows neither 'unsafe-inline' nor 'unsafe-eval', and neither the home page nor the 404 page contains a script element without a src attribute or an inline event handler attribute.
 ---
 
 # A static holding page with a hero "Hello World"
@@ -96,3 +98,158 @@ It is the only option that gives each PR its own address with a real 404 status 
 Its one cost, a Cloudflare token stored once as an organization secret, is the manual step the plan already expects, and it serves every later static project in the organization.
 Option B is the right fallback if the owner wants no outside account at all, accepting that the 404 cannot be validated per PR and that environments go by branch.
 Option C is heavier than the request needs.
+
+## The choice
+
+The orchestrator picked **A, Cloudflare**: it is the only option that gives each PR its own address with a real 404 status and real response headers, so AC7 and the security baseline are validated in dev/test, and one immutable bundle is promoted between environments.
+It asked the design to prefer Pages direct upload over Workers Previews unless the latter's static-asset behaviour can be confirmed.
+It could not be: Cloudflare's Workers documentation describes Version URLs and preview aliases but does not say how static assets or the 404 page behave in them.
+So the host is **Cloudflare Pages, by direct upload from CI** (ADR 0002).
+
+# Design
+
+## The smallest version
+
+A folder of static files, served as they are, with no build:
+
+| File | What it is |
+|---|---|
+| `site/index.html` | The holding page: a `main` landmark holding one `h1` "Hello World" and one short paragraph, centred in the viewport. |
+| `site/404.html` | The 404 page: `h1` "Page not found" and a link to `/`. No script. |
+| `site/tokens.css` | The design tokens, as CSS custom properties on `:root`: colours, spacing, type scale, focus ring. Nothing else. |
+| `site/styles.css` | The styles, using only the tokens. |
+| `site/register-sw.js` | Registers the service worker, after checking `'serviceWorker' in navigator`. |
+| `site/sw.js` | A hand-written service worker: precaches the home page's files on install, serves them cache-first, and deletes old caches on activate. |
+| `site/manifest.webmanifest` | Name, short name, start URL `/`, `display: standalone`, colours, icons. |
+| `site/icons/` | `icon-192.png`, `icon-512.png`, and `icon.svg` linked as the page's icon so the browser does not request a missing `/favicon.ico`. |
+| `site/_headers` | Response headers for every path: the content security policy and two hardening headers. |
+
+Layout: the body is a single-column grid with `min-height: 100svh` that centres `main`; the heading's size is a `clamp()` of the type tokens, so it scales from 320 pixels wide upwards and stays at least twice the body size (AC3).
+System font stack, no web fonts.
+No animation, so `prefers-reduced-motion` has nothing to turn off.
+Links get a token-coloured `:focus-visible` outline of 3 pixels with an offset (AC8); Chromium's default ring is 1 pixel, which AC8 would reject.
+
+The site's name in the manifest and the page titles is "ReframeShift", from the repository name (an assumption; nothing in the request names it).
+
+Security headers in `site/_headers`, for `/*`:
+
+```
+Content-Security-Policy: default-src 'self'; base-uri 'none'; object-src 'none'; form-action 'none'; frame-ancestors 'none'
+X-Content-Type-Options: nosniff
+Referrer-Policy: strict-origin-when-cross-origin
+```
+
+`default-src 'self'` covers scripts, styles, images, the manifest and the worker; nothing is inline, so nothing needs `'unsafe-inline'`.
+
+Two traps for the build, known in advance:
+
+- **Pages strips `.html`**: it redirects `/contact.html` to `/contact`. The service worker must precache only URLs that answer 200 with no redirect (`/`, the stylesheets, the scripts, the manifest, the icons), or `cache.addAll` rejects and the worker never installs. Do not precache `/index.html` or the 404 page.
+- **Without a top-level `404.html`, Pages treats the site as a single-page app** and answers every unknown path with the home page and a 200. The `404.html` file is what makes AC7 pass, and AC7 is what proves it.
+
+## The stack
+
+| Concern | Choice | Standard |
+|---|---|---|
+| Pages | Plain HTML and CSS, no framework, no components | Follows UI.md 1 and 3 (plain HTML and CSS when there are no components). |
+| Language | None beyond two short plain JavaScript files (`register-sw.js`, `sw.js`), no type-checking comments | Follows UI.md 3: there is no logic worth typing. |
+| Build | None: `site/` is the deployable output, archived by `make package` | Follows UI.md 3 ("no build for a static page that does not need one"). There is no `make build`; UI.md lists it "if there is a build". |
+| Styling | CSS custom properties in `tokens.css`; no CSS framework | Follows UI.md 3 and 8 (Firm). Two stylesheets rather than one so the linter can forbid literal colours everywhere except the tokens file; the cost is one extra request of about 1 KB. |
+| Runtime dependencies | None | Follows UI.md 1 and 4. |
+| Development tooling | Node, current LTS line pinned in `.nvmrc` (24 today; move to 26 when it enters LTS), npm with a committed `package-lock.json`, dev dependencies only | Follows UI.md 3 (npm). |
+| End-to-end and acceptance tests | Playwright, Chromium only, with `@axe-core/playwright` | Follows UI.md 3 (Playwright, Firm). Chromium only is the lightest that meets the criteria; no criterion names a browser. |
+| Unit tests | None | Follows UI.md 3 and 11: there is no logic to unit-test. |
+| HTML validation | `html-validate` with its recommended and document presets | No standard names a tool. Chosen over the W3C Nu checker (`vnu-jar`) because it needs no Java; it lints against the HTML specification but is not the reference conformance checker. |
+| CSS validation and token rule | `stylelint` with `stylelint-config-standard`, plus `property-no-unknown`, `declaration-property-value-no-unknown` and `at-rule-no-unknown` for validity; `color-no-hex`, `color-named: never` and `function-disallowed-list` for the colour functions, everywhere except `tokens.css` | Follows UI.md 8 (stylelint for the tokens). There is no maintained npm wrapper for the W3C CSS validator, so stylelint's unknown-property and unknown-value rules stand in for it. |
+| Performance and quality | The current `lighthouse` npm package (a caret range on its latest major, not an old pin), run with Playwright's Chromium against the local copy; performance, accessibility and best practices at 95 or more | Follows UI.md 4. Lighthouse no longer has a PWA category, so installability is checked separately (below). |
+| Installability | A Playwright test that asks Chromium for `Page.getInstallabilityErrors` over the DevTools protocol and expects none | Follows UI.md 4. |
+| Page weight | A Playwright test that loads `/` with an empty cache and fails if the response bodies total more than 50 KB | Follows UI.md 4 (a stated budget). |
+| Dependency check | `scripts/check-deps.mjs`: fails if `package.json` has any `dependencies`, or if a framework or CSS framework (react, vue, svelte, angular, preact, lit, solid-js, tailwindcss, bootstrap and the like) appears anywhere in the lockfile's direct dependencies | Follows UI.md 1 and 4. |
+| Local server | `wrangler pages dev site`, the same server semantics as the host (404 page, `_headers`, `.html` redirects) | No standard covers it. Wrangler is already needed to deploy, so this adds nothing. |
+| Hosting | Cloudflare Pages, direct upload from CI with `wrangler pages deploy` | ADR 0002. GITHUB.md 7 leaves the deploy target to the project. |
+| CI | GitHub Actions, calling only `make` targets | Follows GITHUB.md 7 and ADR 0007 of the framework. |
+
+What this rejects as heavier: Vite, TypeScript, Vitest, Web Components, a service-worker library (Workbox), a CSS framework. None is needed for two static pages and twelve criteria.
+
+## Standards in the project
+
+Set up copies the standards that apply into the project, as the flow asks: `docs/standards/UI.md` and `docs/standards/GITHUB.md`, version 2 draft, unchanged.
+`AGENTS.md` at the root states the project's conventions in a few lines: `make` is the only way to run anything; `site/` is served as it is and has no runtime dependencies; colours and spacing come from `tokens.css`; `tests/acceptance/` belongs to the test agent and is never edited by the engineering agent; commits are `area: what changed` with no AI trailers (GITHUB.md 3); it follows the vendored standards with no recorded differences.
+`.gitignore` covers GITHUB.md 8's list, plus `test-results/`, `playwright-report/`, `.wrangler/` and `.lighthouse/`.
+
+## Project layout
+
+```
+site/                 the bundle (above)
+tests/acceptance/     the test agent's frozen acceptance tests, one file per page or concern
+tests/e2e/            the engineering agent's own checks: installability, page weight, headers file present
+scripts/              check-deps.mjs, lighthouse.mjs, deploy.sh, smoke.sh
+playwright.config.js  baseURL from BASE_URL; when it is unset, a webServer that runs wrangler pages dev on port 8788
+package.json, package-lock.json, .nvmrc, .htmlvalidate.json, .stylelintrc.json
+Makefile
+.github/workflows/ci.yml
+AGENTS.md, README.md, docs/standards/, docs/design/, docs/adr/
+```
+
+## The make targets
+
+| Target | What sits behind it |
+|---|---|
+| `make setup` | `npm ci`, then `npx playwright install chromium` (with `--with-deps` when `CI` is set). |
+| `make check` | `check-html`, `check-css`, `check-deps`, `check-lighthouse`, then `make test` and `make acceptance` (local). Fails if any fails. |
+| `make check-html` | `html-validate site/*.html`. |
+| `make check-css` | `stylelint "site/**/*.css"`. |
+| `make check-deps` | `node scripts/check-deps.mjs`. |
+| `make check-lighthouse` | Starts the local copy, runs `node scripts/lighthouse.mjs` against `/` and the 404 page, fails below 95 in performance, accessibility or best practices, stops the server. |
+| `make test` | `playwright test tests/e2e` against a local copy. |
+| `make acceptance` | `playwright test tests/acceptance`; against `BASE_URL` when it is set, otherwise Playwright's `webServer` starts the local copy. |
+| `make dev` | `wrangler pages dev site` on port 8788. |
+| `make package` | `tar` of `site/` into `dist/site.tar.gz`, with `dist/site.tar.gz.sha256` beside it. No rebuild happens anywhere after this. |
+| `make deploy ENV=<env>` | `scripts/deploy.sh`: unpacks `dist/site.tar.gz` (or `ARTIFACT`) to a temporary folder, creates the Pages project `reframeshift-trial` with production branch `main` if it does not exist, runs `wrangler pages deploy <folder> --project-name reframeshift-trial --branch <branch> --commit-hash <sha>` with `WRANGLER_OUTPUT_FILE_PATH` set, reads the deployment's URL from that output, and writes it to `dist/deploy-<env>.url`, to `$GITHUB_OUTPUT` as `url` and to `$GITHUB_STEP_SUMMARY` when those are set. Branch: `pr-<PR_NUMBER>` for `dev`, `staging` for `staging`, `main` for `prod`. Needs `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`; fails with a plain message if either is missing. |
+| `make smoke ENV=<env>` | `scripts/smoke.sh` with `curl` against `BASE_URL`, or the address in `dist/deploy-<env>.url`: `/` answers 200 and contains "Hello World"; `/this-page-does-not-exist` answers 404; `/` carries a `Content-Security-Policy` header. |
+| `make help` | Lists the targets. |
+
+The published address is the deployment's **unique URL** (`<hash>.<project>.pages.dev`), not the branch alias, so the address belongs to one commit, as the flow's "evidence belongs to a version" asks.
+The project's `pages.dev` subdomain is not assumed: Cloudflare adds a suffix when the name is taken, so the scripts always read the address from wrangler's output.
+
+## Environments
+
+- **Dev/test, per PR:** a Pages preview deployment on branch `pr-<n>`. CI deploys it on every push to the PR, and publishes its address as a GitHub deployment on the environment `pr-<n>` (the job's `environment.url`), which shows on the PR and is what the driver reads in M5, and in the job summary.
+- **Staging and prod:** `make deploy ENV=staging` and `ENV=prod` already work, with the same bundle. Wiring them into CI, and making staging private (Cloudflare Access), is the release work of the flow's v2 and is not in this pull request.
+
+### CI
+
+`.github/workflows/ci.yml`, with `permissions: contents: read` at the top, actions pinned to their current major versions, and one concurrency group per PR that cancels superseded runs:
+
+1. **`check`** (pull requests, and pushes to `main`): checkout, `actions/setup-node` from `.nvmrc` with the npm cache, `make setup`, `make check`, `make package`, then upload `dist/` as the artifact `site-<sha>`.
+2. **`deploy-dev`** (pull requests only, after `check`): environment `pr-<n>` with `url` from the deploy step's output. Checkout, setup-node, `make setup`, download `site-<sha>` into `dist/`, `make deploy ENV=dev` (the only step given the two Cloudflare secrets), `make smoke ENV=dev`. Exposes the address as a job output.
+3. **`acceptance-dev`** (after `deploy-dev`): checkout, setup-node, `make setup`, `make acceptance` with `BASE_URL` set to that address.
+
+The three job names are the PR's checks: CI green, the address, and validation against the deployed version.
+
+### What the owner sets up once
+
+- A Cloudflare account; an API token with the account permission **Cloudflare Pages: Edit**; the organization secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` in `agentic-orc-farm`, available to this repository. This is the manual step the plan's M4 decision expects, and it serves every later static project.
+- Branch protection on `main` (GITHUB.md 8, "from the day the repository is created"), requiring the three checks. Agents cannot touch the forge, so this is the owner's or the driver's.
+
+## Increments
+
+None: the request fits one pull request, and that pull request is already the barest real thing, deployed and validated end to end.
+
+## Existing behaviour
+
+The repository holds only a one-line README and this design, so no criterion of kind `existing` has anything to protect.
+The criteria that guard what later changes could break (the 404 status, offline, no inline script) are written as `new` here and stay in the frozen suite for every later change.
+
+## Decision records
+
+- `docs/adr/0001-plain-static-site-no-build.md`: plain HTML and CSS, no build, no runtime dependencies, development tooling through npm behind `make`.
+- `docs/adr/0002-cloudflare-pages-direct-upload.md`: Cloudflare Pages by direct upload from CI, a preview per PR, one bundle for every environment.
+
+## What I could not verify
+
+- That Pages answers a custom `404.html` with status 404: Cloudflare's page on serving Pages describes the custom page but not its status. Widely relied on, and AC7 and `make smoke` check it on the first deploy.
+- That `_headers` rules apply to preview deployments and to 404 responses. AC12 asks for the header on the home page only, for that reason; the smoke test checks it on the deployed preview.
+- The exact field names in wrangler's ND-JSON output for `pages deploy`. Cloudflare's changelog (2025-11-03) says `pages deploy` writes it, but does not show the format; `deploy.sh` must read it from a real run and fail loudly if no URL is found.
+- That `wrangler pages dev` applies `_headers` and the 404 page locally exactly as the host does. If it does not, the deployed run still catches it; the local copy then needs a small Node static server instead.
+- That Chromium reports installability errors over the DevTools protocol in headless mode. If it does not, the installability test runs headed under `xvfb-run` in CI.
+- How Workers static assets behave in Version URLs and Previews. Cloudflare's direction is Workers with static assets, and Pages appears to be in maintenance rather than scheduled for shutdown; I found no dated end for Pages. ADR 0002 says when to revisit.
