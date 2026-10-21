@@ -53,7 +53,7 @@ criteria:
 
 Create a new static website: a holding page with a prominent, hero-level "Hello World".
 There is no existing project, so this also sets the project's first conventions.
-The result is responsive and accessible, and goes through the normal workflow: a pull request, CI, a per-PR dev/test deployment with an address, and validation there.
+The result is responsive and accessible, and goes through the normal workflow: a pull request, CI on every push, review, then one private dev/test deployment of the reviewed commit, with an address, and validation there.
 
 The repository is empty apart from a one-line README, so there is no existing behaviour for a criterion of kind `existing` to protect.
 
@@ -111,6 +111,10 @@ The orchestrator picked **A, Cloudflare**: it is the only option that gives each
 It asked the design to prefer Pages direct upload over Workers Previews unless the latter's static-asset behaviour can be confirmed.
 It could not be: Cloudflare's Workers documentation describes Version URLs and preview aliases but does not say how static assets or the 404 page behave in them.
 So the host is **Cloudflare Pages, by direct upload from CI** (ADR 0002).
+
+The owner then asked for deploy and environments to follow the updated flow (the framework's ADR 0011): CI checks every push but deploys only when the driver asks, for one reviewed commit, and only prod is public.
+Option A still holds; what changes is when CI deploys (ADR 0003) and that dev/test and staging sit behind Cloudflare Access (ADR 0004).
+Where option A above says a preview is created "for the PR" and that preview addresses are public, the Environments section below supersedes it.
 
 # Design
 
@@ -179,6 +183,7 @@ So the offline tests (`tests/e2e/offline.spec.js`, and the acceptance test for A
 4. Reload `/`. The test fails if any page request failed, if the `h1` "Hello World" is missing, or if no worker-owned request was aborted (`context.on('requestfailed')` with `request.serviceWorker()` set). That last condition proves the cut reached the worker; without it, a Playwright that stopped routing worker requests would let the test pass with the network still on.
 
 This method works the same against the local copy and against a deployed `BASE_URL`, which matters because AC10 runs against the dev/test address, where the test cannot stop the server.
+Against dev/test, step 1 also depends on the Access sign-in cookie (see "Reaching the private address in tests"): the worker's precache requests are its own, and without the cookie they would be sent to the Access login and the worker would never install.
 Playwright is pinned at 1.57 or later in `package.json` for this reason, and `PLAYWRIGHT_DISABLE_SERVICE_WORKER_NETWORK` must not be set anywhere.
 
 If the break check below shows the method does not reach the worker on the Playwright in use, the fallback for `tests/e2e/offline.spec.js` is to serve `site/` from a small Node static server started by the test on a free port, and stop that server before the reload; AC10 against a deployed address would then keep the route method, and the design would need revisiting.
@@ -191,6 +196,8 @@ A check that still passes with its fault in place is not testing what it claims.
 | Fault | Check that must fail |
 |---|---|
 | Remove one entry (`/styles.css`) from the worker's precache list | `make test` (`tests/e2e/offline.spec.js`) |
+| A deploy nobody asked for: run `make deploy ENV=dev` with `CI=1`, dummy Cloudflare values, `COMMIT_SHA` set to the head commit and `DEPLOY_REQUEST` naming another commit | `make deploy` fails at the request check, before any network call |
+| A dev/test address left public: run `make smoke ENV=dev` against the local copy (`make dev`, which has no login), with `BASE_URL=http://localhost:8788` | `make smoke` fails on the privacy check |
 
 ## The stack
 
@@ -212,15 +219,17 @@ A check that still passes with its fault in place is not testing what it claims.
 | Dependency check | `scripts/check-deps.mjs`: fails if `package.json` has any `dependencies`, or if a framework or CSS framework (react, vue, svelte, angular, preact, lit, solid-js, tailwindcss, bootstrap and the like) appears anywhere in the lockfile's direct dependencies | Follows UI.md 1 and 4. |
 | Local server | `wrangler pages dev site`, the same server semantics as the host (404 page, `_headers`, `.html` redirects) | No standard covers it. Wrangler is already needed to deploy, so this adds nothing. |
 | Hosting | Cloudflare Pages, direct upload from CI with `wrangler pages deploy` | ADR 0002. GITHUB.md 7 leaves the deploy target to the project. |
-| CI | GitHub Actions, calling only `make` targets | Follows GITHUB.md 7 and ADR 0007 of the framework. |
+| When CI deploys | Only when the driver pushes a request tag `deploy/dev/<sha>` for one reviewed commit | ADR 0003. Follows the framework's flow (ADR 0011); GITHUB.md 7 says who deploys is a per-project decision the project records. |
+| Private dev/test and staging | Cloudflare Access on the Pages project's preview deployments; CI signs in with an Access service token | ADR 0004. Follows the flow's "only prod is public"; no standard names a tool. |
+| CI | GitHub Actions, calling only `make` targets: `ci.yml` checks every push, `deploy.yml` packages, deploys and validates on request | Follows GITHUB.md 7 and ADR 0007 of the framework. |
 
 What this rejects as heavier: Vite, TypeScript, Vitest, Web Components, a service-worker library (Workbox), a CSS framework. None is needed for two static pages and fourteen criteria.
 
 ## Standards in the project
 
 Set up copies the standards that apply into the project, as the flow asks: `docs/standards/UI.md` and `docs/standards/GITHUB.md`, version 2 draft, unchanged.
-`AGENTS.md` at the root states the project's conventions in a few lines: `make` is the only way to run anything; `site/` is served as it is and has no runtime dependencies; colours and spacing come from `tokens.css`; `tests/acceptance/` belongs to the test agent and is never edited by the engineering agent; commits are `area: what changed` with no AI trailers (GITHUB.md 3); it follows the vendored standards with one recorded difference: the two JavaScript files carry no type-checking comments, departing from UI.md 3's default, because they hold no logic worth typing.
-`.gitignore` covers GITHUB.md 8's list, plus `test-results/`, `playwright-report/`, `.wrangler/` and `.lighthouse/`.
+`AGENTS.md` at the root states the project's conventions in a few lines: `make` is the only way to run anything; `site/` is served as it is and has no runtime dependencies; colours and spacing come from `tokens.css`; `tests/acceptance/` belongs to the test agent and is never edited by the engineering agent; commits are `area: what changed` with no AI trailers (GITHUB.md 3); CI deploys only on a `deploy/dev/<sha>` request tag, never on a branch push (ADR 0003); dev/test and staging are private behind Cloudflare Access and only prod is public (ADR 0004); it follows the vendored standards with one recorded difference: the two JavaScript files carry no type-checking comments, departing from UI.md 3's default, because they hold no logic worth typing.
+`.gitignore` covers GITHUB.md 8's list, plus `test-results/`, `playwright-report/`, `.wrangler/`, `.lighthouse/` and `.auth/` (the Access sign-in state the tests save).
 
 ## Project layout
 
@@ -228,11 +237,13 @@ Set up copies the standards that apply into the project, as the flow asks: `docs
 site/                 the bundle (above)
 tests/acceptance/     the test agent's frozen acceptance tests, one file per page or concern
 tests/e2e/            the engineering agent's own checks: installability, page weight, offline with no failed request, headers file present
+tests/support/        access-setup.js: the Playwright global setup that signs in through Cloudflare Access (engineering's, not the test agent's)
 scripts/              check-deps.mjs, lighthouse.mjs, deploy.sh, smoke.sh
-playwright.config.js  baseURL from BASE_URL; when it is unset, a webServer that runs wrangler pages dev on port 8788
+playwright.config.js  baseURL from BASE_URL; when it is unset, a webServer that runs wrangler pages dev on port 8788; the Access sign-in when its variables are set
 package.json, package-lock.json, .nvmrc, .htmlvalidate.json, .stylelintrc.json
 Makefile
-.github/workflows/ci.yml
+.github/workflows/ci.yml       checks every push
+.github/workflows/deploy.yml   package, deploy to dev/test and validate, only on a request tag
 AGENTS.md, README.md, docs/standards/, docs/design/, docs/adr/
 ```
 
@@ -247,43 +258,101 @@ AGENTS.md, README.md, docs/standards/, docs/design/, docs/adr/
 | `make check-deps` | `node scripts/check-deps.mjs`. |
 | `make check-lighthouse` | Starts the local copy, runs `node scripts/lighthouse.mjs` against `/` and the 404 page, fails below 95 in performance, accessibility or best practices, stops the server. |
 | `make test` | `playwright test tests/e2e` against a local copy. |
-| `make acceptance` | `playwright test tests/acceptance`; against `BASE_URL` when it is set, otherwise Playwright's `webServer` starts the local copy. |
+| `make acceptance` | `playwright test tests/acceptance`; against `BASE_URL` when it is set, otherwise Playwright's `webServer` starts the local copy. When `BASE_URL`, `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` are all set, it signs in through Cloudflare Access first ("Reaching the private address in tests", below). |
 | `make dev` | `wrangler pages dev site` on port 8788. |
 | `make package` | `tar` of `site/` into `dist/site.tar.gz`, with `dist/site.tar.gz.sha256` beside it. No rebuild happens anywhere after this. |
-| `make deploy ENV=<env>` | `scripts/deploy.sh`: unpacks `dist/site.tar.gz` (or `ARTIFACT`) to a temporary folder, creates the Pages project `reframeshift-trial` with production branch `main` if it does not exist, runs `wrangler pages deploy <folder> --project-name reframeshift-trial --branch <branch> --commit-hash "$COMMIT_SHA"` with `WRANGLER_OUTPUT_FILE_PATH` set, reads the deployment's URL from that output, and writes it to `dist/deploy-<env>.url`, to `$GITHUB_OUTPUT` as `url` and to `$GITHUB_STEP_SUMMARY` when those are set. Branch: `pr-<PR_NUMBER>` for `dev`, `staging` for `staging`, `main` for `prod`. Needs `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` and `COMMIT_SHA` (the commit the bundle was built from, below); fails with a plain message if any is missing. |
-| `make smoke ENV=<env>` | `scripts/smoke.sh` with `curl` against `BASE_URL`, or the address in `dist/deploy-<env>.url`: `/` answers 200 and contains "Hello World"; `/this-page-does-not-exist` and `/no/such/page` answer 404; `/` carries a `Content-Security-Policy` header. |
+| `make deploy ENV=<env>` | `scripts/deploy.sh`, for `ENV` of `dev`, `staging` or `prod`, which deploy to the Pages branches `dev`, `staging` and `main` (the production branch). In order: **(1)** fails with a plain message if `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` or `COMMIT_SHA` is missing. **(2)** The request check: when `CI` is set, fails unless `DEPLOY_REQUEST` (the tag that started the run) is exactly `deploy/<ENV>/<COMMIT_SHA>`, so CI cannot deploy without a request naming this commit (ADR 0003). **(3)** Fails if the Pages project `reframeshift-trial` does not exist; it never creates it, because a new project's previews are public until Access is turned on. **(4)** The privacy guard, for `dev` and `staging`: reads the project's `pages.dev` subdomain from `wrangler pages project list`, requests `https://access-probe.<subdomain>/` with no credentials and without following redirects, and refuses to deploy unless the answer is a redirect to a `cloudflareaccess.com` address, a 401 or a 403 (ADR 0004). **(5)** Unpacks `dist/site.tar.gz` (or `ARTIFACT`) to a temporary folder and runs `wrangler pages deploy <folder> --project-name reframeshift-trial --branch <branch> --commit-hash "$COMMIT_SHA"` with `WRANGLER_OUTPUT_FILE_PATH` set. **(6)** Reads the deployment's unique URL from that output, fails loudly if there is none, and writes it to `dist/deploy-<env>.url`, to `$GITHUB_OUTPUT` as `url` and to `$GITHUB_STEP_SUMMARY` beside `COMMIT_SHA`, when those are set. |
+| `make smoke ENV=<env>` | `scripts/smoke.sh` with `curl`, against `BASE_URL` or else the address in `dist/deploy-<env>.url`. Signed in (the two Access headers, when `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` are set): `/` answers 200 and contains "Hello World"; `/this-page-does-not-exist` and `/no/such/page` answer 404; `/` carries a `Content-Security-Policy` header. Then the privacy check, with no credentials and no redirect following: for `dev` and `staging`, `/` must answer a redirect to a `cloudflareaccess.com` address, a 401 or a 403, never 200; for `prod`, `/` must answer 200 and contain "Hello World". |
+| `make pages-project` | One-time, run by the owner with their own token: `wrangler pages project create reframeshift-trial --production-branch main`. Not used by CI. |
 | `make help` | Lists the targets. |
 
-The published address is the deployment's **unique URL** (`<hash>.<project>.pages.dev`), not the branch alias, so the address belongs to one commit, as the flow's "evidence belongs to a version" asks.
-For a pull request that commit is the **PR's head commit**, not the merge commit GitHub creates (see CI below); for a push to `main` it is the pushed commit.
-The project's `pages.dev` subdomain is not assumed: Cloudflare adds a suffix when the name is taken, so the scripts always read the address from wrangler's output.
+The published address is the deployment's **unique URL** (`<hash>.<subdomain>`), not the branch alias, so the address belongs to one commit, as the flow's "evidence belongs to a version" asks.
+The project's `pages.dev` subdomain is not assumed: Cloudflare adds a suffix when the name is taken, so the scripts always read it from wrangler.
 
 ## Environments
 
-- **Dev/test, per PR:** a Pages preview deployment on branch `pr-<n>`. CI deploys it on every push to the PR, and publishes its address as a GitHub deployment on the environment `pr-<n>` (the job's `environment.url`), which shows on the PR and is what the driver reads in M5, and in the job summary.
-- **Staging and prod:** `make deploy ENV=staging` and `ENV=prod` already work, with the same bundle. Wiring them into CI, and making staging private (Cloudflare Access), is the release work of the flow's v2 and is not in this pull request.
+| Environment | Where | Who can see it | When it is deployed |
+|---|---|---|---|
+| Dev/test | A Pages preview deployment on branch `dev`; each deployment has its own unique URL | The owner, signed in through Cloudflare Access; CI, with an Access service token | Once per feature, when the driver asks, for the commit that passed review (this pull request wires it) |
+| Staging | A Pages preview deployment on branch `staging` | As dev/test: the same Access policy covers every preview | On every merge, in the flow's v2 (steps 13 to 15); `make deploy ENV=staging` already works |
+| Prod | The Pages production branch `main`, at `<subdomain>` | Everyone: the only public environment | After the owner's release decision, in the flow's v2; `make deploy ENV=prod` already works |
+
+Wiring staging and prod into CI is the release work of the flow's v2 and is not in this pull request; the deploy request check (step 2 of `make deploy`) will be extended for them then.
+Until then, nothing in CI deploys anything except a requested dev/test deployment.
+
+### How the driver asks for a deploy (ADR 0003)
+
+After review passes, the driver pushes one lightweight tag, `deploy/dev/<sha>`, pointing at the reviewed commit, using the GitHub App's token (the refspec is `<sha>:refs/tags/deploy/dev/<sha>`).
+That push starts `.github/workflows/deploy.yml`, and only that workflow.
+GitHub runs a push-triggered workflow from the pushed commit's own copy of the file, so the request works for this pull request, which is the one that creates the workflow.
+
+`workflow_dispatch` is not used, although it reads more naturally as "the driver asks", because GitHub only dispatches a workflow whose file is on the default branch.
+On this first pull request `main` holds only the README, so the dev/test deploy that must happen before merge could not be requested at all.
+
+- A deploy is requested once per feature. A fixed commit after a failed validation has a new SHA, so it gets a new tag.
+- Re-running the same commit's deploy, for example after a host outage, is a re-run of that workflow run, not a new tag.
+- Tags under `deploy/` are requests, not releases; release tags (GITHUB.md 6) will be `v*`. They stay as the record of what was asked for, and nothing cleans them up until they cause friction.
+- A tag pushed with a workflow's own `GITHUB_TOKEN` would start nothing; the driver's App token does start workflows.
 
 ### CI
 
-`.github/workflows/ci.yml`, with `permissions: contents: read` at the top, actions pinned to their current major versions, and one concurrency group per PR that cancels superseded runs.
+Both workflows set `permissions: contents: read` at the top and pin actions to their current major versions.
 
-**Which commit.** On `pull_request` events, `github.sha` and the default `actions/checkout` ref are the synthetic merge commit (`refs/pull/<n>/merge`), which exists only on GitHub and changes whenever `main` moves.
-The workflow does not use it.
-It sets one workflow-level variable, `COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}`, and every job checks out `ref: ${{ env.COMMIT_SHA }}`.
-So on a PR, CI checks, packages, deploys and accepts the PR's head commit, the commit the driver pushed and records evidence against; on a push to `main`, it is the pushed commit.
-The artifact is `site-${COMMIT_SHA}`, `make deploy` passes the same value to `--commit-hash`, and the job summary prints it beside the address.
-What this gives up is testing the PR merged with the current `main`. Branch protection closes that gap by requiring the branch to be up to date with `main` before merging (below), so the tree that was tested is the tree that merges.
+**`ci.yml`, on `pull_request` and on `push` to `main`:** one job, **`check`**.
+It checks out `COMMIT_SHA`, set at workflow level to `${{ github.event.pull_request.head.sha || github.sha }}`, so on a pull request it checks the commit that was pushed, not GitHub's synthetic merge commit (the driver brings the branch up to date with `main` before review, so the reviewed and deployed commit is the one that would merge).
+Then `actions/setup-node` from `.nvmrc` with the npm cache, `make setup`, `make check`.
+One concurrency group per ref cancels superseded runs.
+It has no package step, no deploy step and no Cloudflare secrets.
+Its `push` filter names only branches, so the request tags do not start it.
 
-1. **`check`** (pull requests, and pushes to `main`): checkout of `COMMIT_SHA`, `actions/setup-node` from `.nvmrc` with the npm cache, `make setup`, `make check`, `make package`, then upload `dist/` as the artifact `site-<COMMIT_SHA>`.
-2. **`deploy-dev`** (pull requests only, after `check`): environment `pr-<n>` with `url` from the deploy step's output. Checkout of `COMMIT_SHA`, setup-node, `make setup`, download `site-<COMMIT_SHA>` into `dist/`, `make deploy ENV=dev` (the only step given the two Cloudflare secrets), `make smoke ENV=dev`. Exposes the address and `COMMIT_SHA` as job outputs.
-3. **`acceptance-dev`** (after `deploy-dev`): checkout of `COMMIT_SHA` (for the frozen tests), setup-node, `make setup`, `make acceptance` with `BASE_URL` set to that address.
+**`deploy.yml`, on `push` of tags matching `deploy/dev/*` only:** three jobs, one per flow step, so the driver reads each step's evidence from its own job.
+`COMMIT_SHA` is `${{ github.sha }}`, the tagged commit, and every job checks it out.
 
-The three job names are the PR's checks: CI green, the address, and validation against the deployed version.
+1. **`package`** (step 8): setup-node, `make setup`, `make package`, upload `dist/` as the artifact `site-<COMMIT_SHA>`.
+2. **`deploy`** (step 9, after `package`): environment `dev`, with `url` taken from the deploy step's output. Setup-node, `make setup`, download `site-<COMMIT_SHA>` into `dist/`, then `make deploy ENV=dev` with `COMMIT_SHA`, `DEPLOY_REQUEST: ${{ github.ref_name }}` and the two Cloudflare secrets, which only this step receives. Exposes the address as the job output `url`.
+3. **`validate`** (step 10, after `deploy`): setup-node, `make setup`, then `make smoke ENV=dev` and `make acceptance`, each with `BASE_URL` set to the `deploy` job's `url` and the two Access secrets, which only these two steps receive. The frozen acceptance tests come from the tagged commit's own checkout.
+
+### Publishing the address
+
+- **The GitHub deployment record.** The `deploy` job's environment `dev` creates a deployment for `COMMIT_SHA` whose status carries the address as `environment_url`. The driver reads it by commit (`GET /repos/<repo>/deployments?sha=<sha>&environment=dev`, then that deployment's statuses) and posts it on the pull request. Because the deployment's ref is the tag, not the PR branch, GitHub may not show it on the PR by itself; the driver's comment is what the owner sees.
+- **The run itself.** The `deploy` job's output `url` and its job summary, which prints the address beside the commit.
+
+One environment, `dev`, serves every pull request, so environments do not accumulate; GitHub marks an older deployment inactive when a newer one lands, but its address keeps working and the driver reads by commit, not by "latest".
+
+### Keeping dev/test and staging private (ADR 0004)
+
+- The Pages project's setting **Enable access policy** puts Cloudflare Access in front of every preview deployment, and not the production address. Its default policy lets the members of the owner's Cloudflare account in, so the owner signs in with their email to look.
+- The owner adds a second policy to that Access application, action **Service Auth**, including one service token, `github-ci`. Strict service token authentication stays off, so Access answers a signed-in request with a `CF_Authorization` cookie that later requests can reuse.
+- CI signs in by sending the token as the `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers: `curl` in `make smoke`, and Playwright's global setup in `make acceptance`.
+- Prod is the production branch, outside the policy, so it is public.
+- Two checks keep it so: `make deploy` refuses to deploy to dev/test or staging unless an unknown preview host under the project already answers with the Access login (step 4), and `make smoke` fails if the deployed address answers anyone not signed in.
+
+### Reaching the private address in tests
+
+When `BASE_URL`, `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` are all set, `playwright.config.js`:
+
+- sets `use.extraHTTPHeaders` to the two Access headers, so the `request` fixture's calls (status codes, headers) are signed in;
+- runs `tests/support/access-setup.js` as `globalSetup`: it requests `BASE_URL` with the headers, fails with a plain message ("could not sign in to <address> through Cloudflare Access") unless the answer is 200 and a `CF_Authorization` cookie came back, and saves the storage state to `.auth/access.json`;
+- sets `use.storageState` to that file, so every browser context starts signed in by cookie.
+
+The cookie is what lets the service worker in: its install-time precache and its network-first fetches are its own same-origin requests, which carry the browser's cookies, and the design does not rely on Playwright's extra headers reaching a worker's requests.
+With none of the three variables set (the local copy), the config does none of this.
+
+One rule for the test agent, because it writes the acceptance tests and not the config: use Playwright's own fixtures (`page`, `context`, `request`), and change settings for a test with `test.use({...})`, never with a hand-made `browser.newContext()`. A hand-made context would not carry the sign-in, and the test would pass locally and fail against dev/test for a reason unrelated to the site.
 
 ### What the owner sets up once
 
-- A Cloudflare account; an API token with the account permission **Cloudflare Pages: Edit**; the organization secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` in `agentic-orc-farm`, available to this repository. This is the manual step the plan's M4 decision expects, and it serves every later static project.
-- Branch protection on `main` (GITHUB.md 8, "from the day the repository is created"), requiring the three checks and requiring branches to be up to date before merging (CI tests the head commit, not the merge commit). Agents cannot touch the forge, so this is the owner's or the driver's.
+Before the driver's first deploy request (step 9), not before the build; `make deploy` refuses to run until it is done.
+
+1. A Cloudflare account, with Zero Trust on its free plan (a team name, and the one-time PIN login method).
+2. An API token with the account permission **Cloudflare Pages: Edit**; the organization secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` in `agentic-orc-farm`, available to this repository.
+3. `make pages-project`, with that token in the environment, to create the Pages project.
+4. In the project's settings, **Enable access policy**.
+5. In Zero Trust, a service token `github-ci` (one year); a **Service Auth** policy including it on the Access application from step 4; the organization secrets `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET`. When the token expires, the `validate` job fails at sign-in with the message above, and the owner renews it.
+6. Branch protection on `main` (GITHUB.md 8), requiring the `check` job.
+
+Steps 1, 2 and the service token in step 5 serve every later static project in the organization; steps 3, 4 and the policy in step 5 repeat per project.
+Agents cannot touch Cloudflare or the forge, so these are the owner's.
 
 ## Increments
 
@@ -297,7 +366,9 @@ The criteria that guard what later changes could break (the 404 status, offline,
 ## Decision records
 
 - `docs/adr/0001-plain-static-site-no-build.md`: plain HTML and CSS, no build, no runtime dependencies, development tooling through npm behind `make`.
-- `docs/adr/0002-cloudflare-pages-direct-upload.md`: Cloudflare Pages by direct upload from CI, a preview per PR, one bundle for every environment.
+- `docs/adr/0002-cloudflare-pages-direct-upload.md`: Cloudflare Pages by direct upload from CI, preview deployments for dev/test and staging, the production branch for prod, one bundle for every environment.
+- `docs/adr/0003-deploy-on-a-request-tag.md`: CI deploys only when the driver pushes a `deploy/dev/<sha>` tag for one reviewed commit; never on a branch push.
+- `docs/adr/0004-private-previews-behind-cloudflare-access.md`: dev/test and staging behind Cloudflare Access, CI signing in with a service token, prod public.
 
 ## What I could not verify
 
@@ -309,6 +380,11 @@ The criteria that guard what later changes could break (the 404 status, offline,
 - That Pages serves the top-level `404.html`, with status 404, for an unknown nested path such as `/no/such/page`. Cloudflare's documentation says it looks for the nearest `404.html` up the directory tree; AC7 and `make smoke` check it.
 - What `Cache-Control` Pages sends for static assets. The worker's network-first fetch goes through the browser's HTTP cache, so a long `max-age` would let a stale file be served online; if the first deploy shows one, `_headers` sets `Cache-Control: no-cache` for `/*`.
 - That the offline tests really cut the worker's network. `context.setOffline(true)` has a record of not applying to service-worker fetches in Chromium (Playwright issue 2311, closed without a fix), and Playwright's documentation of `setOffline` does not mention service workers either way. The design does not rely on it: it adds `context.route` aborts, which Playwright's 1.57 release notes and its service-worker guide say reach worker-owned requests in Chromium. I have not run this. The offline test's own check that at least one worker request was aborted, and the break check that removes a precache entry, show on the first run whether it works.
+- That the Pages setting **Enable access policy** covers every hostname under the project except production. Cloudflare's page says it protects "every randomly generated preview link" and not the production `pages.dev` domain; it does not say whether branch aliases (`dev.<subdomain>`, `staging.<subdomain>`) or a host with no deployment behind it (the deploy guard's `access-probe.<subdomain>`) are covered. The published addresses are unique deployment URLs, which are covered. If the probe host is not intercepted, the guard fails falsely on the first deploy and probes the last preview deployment's unique URL instead (from `wrangler pages deployment list`); if the `staging` alias is not covered, staging in v2 needs its own Access application for that host. `make smoke` checks the address it was given either way.
+- That Access returns a `CF_Authorization` cookie to a request signed in with a service token when strict service token authentication is off. Cloudflare's service token page says that in strict mode no cookie is returned, and its earlier service token page says a valid token gets a cookie; the global setup fails with a plain message if none comes back, and the fallback is to drop the cookie and rely on `extraHTTPHeaders`, which would then have to be shown to reach the worker's requests.
+- Whether Zero Trust's free plan asks for a payment method; the pages I read say only that it is free for up to 50 users.
+- Whether the `deploy` job's environment record needs `deployments: write` beyond `contents: read`. GitHub creates the record for a job's `environment`; if the first run shows the token needs it, the permission is added to that job only.
+- That a tag pushed with a GitHub App installation token starts a `push` workflow. GitHub's events page says only that `GITHUB_TOKEN` pushes start nothing; App tokens are widely used for this. The driver's first request shows it.
 - How Workers static assets behave in Version URLs and Previews. Cloudflare's direction is Workers with static assets, and Pages appears to be in maintenance rather than scheduled for shutdown; I found no dated end for Pages. ADR 0002 says when to revisit.
 
 ## Changes after review (round 2)
@@ -322,3 +398,13 @@ The criteria that guard what later changes could break (the 404 status, offline,
 ## Changes after review (round 3)
 
 - **F6:** a new section, "Turning the network off in the tests", says how the offline e2e test and the AC10 acceptance test cut the network for both the page and the worker (`context.setOffline(true)` plus a `context.route` that aborts every request, which since Playwright 1.57 reaches the worker's own fetches in Chromium), counts failures only among the page's requests (skipping those where `request.serviceWorker()` is set), and fails if no worker request was aborted. Playwright is pinned at 1.57 or later. A new "Break checks" section requires removing a precache entry and seeing the offline test fail. AC10's text now says the network is off for the page and its worker; its meaning is unchanged. ADR 0001's "What enforces it" and "What I could not verify" say the same.
+
+## Changes after the owner's review (round 4)
+
+The owner asked for deploy and environments to follow the updated flow (the framework's ADR 0011): review before deploy, one deploy per feature, only prod public.
+
+- **CI never deploys on a branch push.** `ci.yml` checks every push and does nothing else; packaging, deploying and validating moved to `deploy.yml`, which runs only when the driver pushes a `deploy/dev/<sha>` tag for the reviewed commit (ADR 0003). Its three jobs, `package`, `deploy` and `validate`, are the flow's steps 8 to 10. `make deploy` fails in CI without a request naming the commit.
+- **Dev/test and staging are private.** Pages previews sit behind Cloudflare Access; the owner signs in by email, and CI signs in with a service token, in `curl` for smoke and in a Playwright global setup that saves the Access cookie so the service worker is signed in too (ADR 0004). `make deploy` refuses to deploy a preview unless Access is already in front of the project, and `make smoke` fails if the deployed address answers anyone not signed in. Prod, the production branch, is the only public address.
+- **One `dev` environment, branch `dev`**, replaces the per-PR `pr-<n>` environments and branches; the address is still the deployment's unique URL, read by the driver by commit.
+- `make deploy` no longer creates the Pages project; the owner does once with `make pages-project`, before turning Access on.
+- The owner's one-time setup, the stack table, the layout, `AGENTS.md`, `.gitignore`, the break checks and ADR 0002 are updated to match. The acceptance criteria are unchanged.
