@@ -16,8 +16,9 @@ A `push` run uses the workflow file in the pushed commit.
 - The driver asks for a dev/test deploy by pushing one lightweight tag, `deploy/dev/<sha>`, at the reviewed commit, with the GitHub App's token.
 - `.github/workflows/deploy.yml` runs only on pushes of tags matching `deploy/dev/*`. Its jobs `package`, `deploy` and `validate` are the flow's steps 8, 9 and 10, for the tagged commit.
 - `.github/workflows/ci.yml` runs on pull requests and pushes to `main`, checks, and never packages or deploys.
+- The deploy credentials are secrets of the GitHub environment `dev`, which only `deploy/dev/*` tags may use (ADR 0005), so the request tag is also what unlocks them.
 - A fixed commit gets a new tag; repeating the same commit's deploy is a re-run of its workflow run.
-- Staging and prod triggers come with the flow's release work (v2) and will extend the same request check.
+- Staging and prod triggers come with the flow's release work (v2) and will extend the same request check, each with its own environment and tag rule.
 
 ## Alternatives
 
@@ -34,6 +35,8 @@ A `push` run uses the workflow file in the pushed commit.
 
 ## What enforces it
 
-`make deploy` fails when `CI` is set unless `DEPLOY_REQUEST` (the tag that started the run) is exactly `deploy/<ENV>/<COMMIT_SHA>`, so a deploy step added to `ci.yml`, or run on any other trigger, fails.
+GitHub enforces where the credentials can be read: they are secrets of the `dev` environment, whose deployment rule allows only tags matching `deploy/dev/*`.
+A job in `ci.yml`, or in any run started by a pull request or a branch push, that names `dev` is refused before it starts, and one that does not name it has no Cloudflare or Access credentials to deploy or sign in with.
+`make deploy` fails when `CI` is set unless `DEPLOY_REQUEST` (the tag that started the run) is exactly `deploy/<ENV>/<COMMIT_SHA>`, so even a run started by a request tag deploys only the commit the tag names, and only to the environment it names.
 The engineering step's break check runs it with a mismatched request and sees it fail.
-That `ci.yml` holds no deploy step and no Cloudflare secrets, and that `deploy.yml` has no trigger but the tags, can only be reviewed: the review agent checks both files.
+These can only be reviewed: the review agent checks that `ci.yml` names no environment and has no deploy step, that `deploy.yml` has no trigger but the tags, and that no other workflow is triggered by `deploy/` tags (any such workflow could also name `dev`); the owner checks once that the `dev` environment's rule is the tag pattern alone.
