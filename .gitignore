@@ -1,0 +1,22 @@
+# GITHUB.md 8
+.DS_Store
+__pycache__/
+.venv/
+.worktrees/
+.coverage
+dist/
+*.egg-info/
+node_modules/
+
+# Tool caches
+.cache/
+.npm/
+.stylelintcache
+.eslintcache
+
+# Playwright, Lighthouse and the Access state the tests save
+test-results/
+playwright-report/
+blob-report/
+.lighthouse/
+.auth/

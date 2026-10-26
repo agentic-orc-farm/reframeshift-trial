@@ -1,0 +1,19 @@
+{
+  "name": "reframeshift-trial",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A static holding page with a hero \"Hello World\". Development tooling only; run everything through make.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.14.0",
+    "@playwright/test": "^1.64.1",
+    "chrome-launcher": "^1.2.2",
+    "html-validate": "^11.17.0",
+    "lighthouse": "^13.5.0",
+    "stylelint": "^17.16.0",
+    "stylelint-config-standard": "^40.0.0"
+  }
+}
