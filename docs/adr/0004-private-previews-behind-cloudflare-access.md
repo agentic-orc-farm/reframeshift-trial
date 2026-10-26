@@ -1,6 +1,6 @@
 # 0004: Dev/test and staging behind Cloudflare Access; only prod is public
 
-Status: proposed
+Status: superseded by 0006
 Date: 2026-10-21
 
 ## Context

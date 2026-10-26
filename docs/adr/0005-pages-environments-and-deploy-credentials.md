@@ -1,6 +1,6 @@
 # 0005: Cloudflare Pages environments by branch alias, with the deploy credentials in a GitHub environment
 
-Status: proposed
+Status: superseded by 0006
 Date: 2026-10-21
 Supersedes: 0002
 

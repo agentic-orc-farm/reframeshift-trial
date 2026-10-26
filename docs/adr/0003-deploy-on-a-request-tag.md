@@ -1,6 +1,6 @@
 # 0003: CI deploys only on a request tag for one reviewed commit
 
-Status: proposed
+Status: superseded by 0006
 Date: 2026-10-21
 
 ## Context

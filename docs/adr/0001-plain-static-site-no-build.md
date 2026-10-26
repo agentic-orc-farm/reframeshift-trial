@@ -1,6 +1,6 @@
 # 0001: A plain static site, with no build and no runtime dependencies
 
-Status: proposed
+Status: proposed; amended by 0006 (no wrangler, a local server of its own, and `version.txt` in the package)
 Date: 2026-10-20
 
 ## Context

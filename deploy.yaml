@@ -1,0 +1,5 @@
+components:
+  - name: site
+    kind: static-site
+    plane: cloudflare
+    artefact: site
