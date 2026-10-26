@@ -1,0 +1,52 @@
+# Validates a deployed address when the driver asks, by pushing the tag
+# validate/<env>/<sha>/<host> at the deployed commit (ADR 0006). Nothing else starts it.
+# It calls only make targets. The Access service token reaches the smoke and acceptance
+# steps alone; it is read-only and is the project's only credential.
+name: validate
+
+on:
+  push:
+    tags: ['validate/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    env:
+      COMMIT_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: make setup
+
+      - id: request
+        run: make validate-request
+        env:
+          VALIDATE_REQUEST: ${{ github.ref_name }}
+
+      - run: make smoke ENV="$VALIDATE_ENV"
+        env:
+          VALIDATE_ENV: ${{ steps.request.outputs.env }}
+          BASE_URL: ${{ steps.request.outputs.base_url }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+
+      - run: make acceptance
+        env:
+          BASE_URL: ${{ steps.request.outputs.base_url }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}

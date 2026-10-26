@@ -1,0 +1,46 @@
+# Checks every pull request push and every push to main, then packages the head commit
+# and uploads it as the artefact `site`, the name in deploy.yaml (ADR 0006).
+# It calls only make targets and references no secret. It never deploys.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      # The pull request's head commit, not GitHub's merge commit: the plane matches the
+      # artefact to the run's head_sha, so the artefact must hold that commit.
+      COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.COMMIT_SHA }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: make setup
+
+      - run: make check
+
+      - run: make package
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: site
+          path: dist/site/
+          if-no-files-found: error
